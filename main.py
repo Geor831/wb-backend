@@ -28,14 +28,22 @@ APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "apify_api_Ps05va0Yzzu8YRANSeegUm
 class ArticleRequest(BaseModel):
     article: str
 
+# Словарь для преобразования артикула в поисковый запрос
+ARTICLE_TO_SEARCH = {
+    "61472739": "VeganNova кокосовые сливки",
+    "157065568": "гофрокороб 600x400x400",  # пример
+}
+
 @app.post("/api/analyze-article")
 async def analyze_article(req: ArticleRequest):
     if not APIFY_API_TOKEN:
         raise HTTPException(status_code=500, detail="APIFY_API_TOKEN не настроен")
     try:
-        # Используем актор powerai/wildberries-products-search-scraper
+        # Получаем поисковый запрос из словаря или используем сам артикул
+        search_query = ARTICLE_TO_SEARCH.get(req.article, req.article)
+        
         run_input = {
-            "search": req.article,        # артикул как строка
+            "search": search_query,
             "maxResults": 1
         }
         headers = {
@@ -43,7 +51,7 @@ async def analyze_article(req: ArticleRequest):
             "Content-Type": "application/json"
         }
         resp = requests.post(
-            "https://api.apify.com/v2/acts/powerai~wildberries-products-search-scraper/runs",
+            "https://api.apify.com/v2/acts/getascraper~wildberries-scraper/runs",
             headers=headers,
             json=run_input,
             timeout=30
@@ -54,7 +62,6 @@ async def analyze_article(req: ArticleRequest):
         run_id = run_data['data']['id']
         dataset_id = run_data['data']['defaultDatasetId']
 
-        # Ждём завершения
         for _ in range(20):
             status_resp = requests.get(
                 f"https://api.apify.com/v2/actor-runs/{run_id}",
