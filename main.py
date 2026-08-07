@@ -1,88 +1,102 @@
 import os
-import json
 import time
 import requests
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from dotenv import load_dotenv
 
-app = Flask(__name__)
-CORS(app)
+load_dotenv()
 
-# Токены из переменных окружения (безопасно!)
-APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "apify_api_Ps05va0Yzzu8YRANSeegUm82eevQSq28w3Jb")
-AITUNNEL_TOKEN = os.environ.get("AITUNNEL_TOKEN", "sk-aitunnel-mAZ89Pdr1elwujJMKcMQ7ChEsODz0OFk")
+app = FastAPI()
 
-@app.route('/health', methods=['GET'])
-def health():
-    """Проверка работоспособности для Railway"""
-    return jsonify({"status": "ok"}), 200
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.route('/api/apify', methods=['GET'])
-def get_product():
-    article = request.args.get('article')
-    if not article:
-        return jsonify({"error": "Не указан артикул"}), 400
+@app.get("/")
+async def root():
+    return FileResponse("index.html")
 
+APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "apify_api_Ps05va0Yzzu8YRANSeegUm82eevQSq28w3Jb")
+
+class ArticleRequest(BaseModel):
+    article: str
+
+@app.post("/api/analyze-article")
+async def analyze_article(req: ArticleRequest):
+    if not APIFY_API_TOKEN:
+        raise HTTPException(status_code=500, detail="APIFY_API_TOKEN не настроен")
     try:
-        # 1. Запускаем актор
-        run_url = f"https://api.apify.com/v2/acts/getascraper~wildberries-scraper/runs?token={APIFY_TOKEN}"
-        input_data = {
-            "searchQueries": [],
-            "nmIds": [int(article)],
-            "maxItems": 1,
-            "region": "MOSCOW",
-            "proxyConfiguration": {
-                "useApifyProxy": True,
-                "apifyProxyGroups": ["RESIDENTIAL"]
-            }
+        # Используем актор powerai/wildberries-products-search-scraper
+        run_input = {
+            "search": req.article,        # артикул как строка
+            "maxResults": 1
         }
-        run_response = requests.post(run_url, json=input_data, timeout=30)
-        if run_response.status_code != 200:
-            return jsonify({"error": "Не удалось запустить актор"}), 500
-        run_data = run_response.json()
+        headers = {
+            "Authorization": f"Bearer {APIFY_API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(
+            "https://api.apify.com/v2/acts/powerai~wildberries-products-search-scraper/runs",
+            headers=headers,
+            json=run_input,
+            timeout=30
+        )
+        if resp.status_code != 201:
+            raise Exception(f"Ошибка запуска актора: {resp.text}")
+        run_data = resp.json()
         run_id = run_data['data']['id']
+        dataset_id = run_data['data']['defaultDatasetId']
 
-        # 2. Ждём завершения (до 30 секунд)
-        status = "RUNNING"
-        attempts = 0
-        while status != "SUCCEEDED" and attempts < 15:
+        # Ждём завершения
+        for _ in range(20):
+            status_resp = requests.get(
+                f"https://api.apify.com/v2/actor-runs/{run_id}",
+                headers=headers,
+                timeout=10
+            )
+            if status_resp.status_code != 200:
+                raise Exception("Ошибка получения статуса")
+            status_json = status_resp.json()
+            status = status_json['data']['status']
+            if status == 'SUCCEEDED':
+                break
+            if status in ['FAILED', 'ABORTED']:
+                raise Exception(f"Задача завершилась с {status}")
             time.sleep(2)
-            status_url = f"https://api.apify.com/v2/acts/getascraper~wildberries-scraper/runs/{run_id}?token={APIFY_TOKEN}"
-            status_response = requests.get(status_url, timeout=10)
-            status_data = status_response.json()
-            status = status_data['data']['status']
-            attempts += 1
-
-        if status != "SUCCEEDED":
-            return jsonify({"error": "Актор не завершился успешно"}), 500
-
-        # 3. Получаем данные
-        dataset_url = f"https://api.apify.com/v2/datasets/{run_id}/items?token={APIFY_TOKEN}"
-        dataset_response = requests.get(dataset_url, timeout=10)
-        data = dataset_response.json()
-
-        if not data:
-            return jsonify({"error": "Товар не найден"}), 404
-
-        # Возвращаем первый объект, если пришёл массив
-        if isinstance(data, list) and len(data) > 0:
-            return jsonify(data[0])
         else:
-            return jsonify(data)
+            raise Exception("Таймаут ожидания выполнения задачи")
 
+        items_resp = requests.get(
+            f"https://api.apify.com/v2/datasets/{dataset_id}/items?format=json",
+            headers=headers,
+            timeout=10
+        )
+        if items_resp.status_code != 200:
+            raise Exception("Ошибка получения данных")
+        items = items_resp.json()
+        if not items:
+            raise Exception("Нет данных по артикулу")
+
+        product = items[0]
+        return {
+            "name": product.get("name"),
+            "price": product.get("price"),
+            "rating": product.get("rating"),
+            "feedbacks": product.get("feedbacks"),
+            "seller": product.get("sellerName") or product.get("seller")
+        }
     except requests.exceptions.Timeout:
-        return jsonify({"error": "Превышено время ожидания ответа от Apify"}), 504
+        raise HTTPException(status_code=504, detail="Таймаут при запросе к Apify")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.route('/api/search', methods=['GET'])
-def search_products():
-    """Заглушка для поиска (можно будет реализовать позже)"""
-    query = request.args.get('q', '')
-    # Пока возвращаем пустой список, чтобы не ломать фронтенд
-    return jsonify({"products": []}), 200
-
-if __name__ == '__main__':
-    # Railway передаёт порт через переменную PORT
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
