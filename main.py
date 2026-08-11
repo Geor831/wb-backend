@@ -3,8 +3,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import json
+from bs4 import BeautifulSoup
 import re
+import json
 
 app = FastAPI()
 
@@ -21,95 +22,111 @@ async def root():
     return FileResponse("index.html")
 
 class ArticleRequest(BaseModel):
-    article: str
+    article: str  # теперь это может быть ссылка
 
 def parse_wb_link(url: str):
+    """Парсит страницу Wildberries"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     try:
-        print(f"🔍 Парсим WB: {url}")
         resp = requests.get(url, headers=headers, timeout=10)
-        print(f"   WB статус: {resp.status_code}")
         if resp.status_code != 200:
-            return {"error": f"WB вернул статус {resp.status_code}"}
-        html = resp.text
-        match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html)
-        if not match:
-            match = re.search(r'<script>window\.__INITIAL_STATE__\s*=\s*({.*?});</script>', html)
-        if match:
-            data_str = match.group(1)
-            try:
-                data = json.loads(data_str)
-                if 'props' in data and 'pageProps' in data['props']:
-                    page_props = data['props']['pageProps']
-                    product = page_props.get('product', {})
-                    if product:
-                        name = product.get('name')
-                        price = product.get('priceU') / 100 if product.get('priceU') else None
-                        rating = product.get('rating')
-                        feedbacks = product.get('feedbacks')
-                        seller = product.get('seller', {}).get('name')
-                        print("   WB: товар найден!")
-                        return {
-                            "name": name,
-                            "price": price,
-                            "rating": rating,
-                            "feedbacks": feedbacks,
-                            "seller": seller
-                        }
-                elif 'catalog' in data:
-                    product_data = data.get('catalog', {}).get('product', {})
-                    if product_data:
-                        name = product_data.get('name')
-                        price = product_data.get('priceU') / 100 if product_data.get('priceU') else None
-                        rating = product_data.get('rating')
-                        feedbacks = product_data.get('feedbacks')
-                        seller = product_data.get('seller', {}).get('name')
-                        print("   WB: товар найден!")
-                        return {
-                            "name": name,
-                            "price": price,
-                            "rating": rating,
-                            "feedbacks": feedbacks,
-                            "seller": seller
-                        }
-                print("   WB: товар не найден в JSON")
-                return {"error": "Товар не найден в JSON-данных"}
-            except json.JSONDecodeError as e:
-                print(f"   WB: ошибка парсинга JSON: {e}")
-                return {"error": f"Ошибка парсинга JSON: {e}"}
-        print("   WB: не найден блок с JSON")
-        return {"error": "Не найден блок с JSON-данными"}
-    except Exception as e:
-        print(f"   WB: исключение {e}")
-        return {"error": f"Исключение WB: {str(e)}"}
-
-def search_ozon(query: str):
-    try:
-        print(f"🔍 Ищем на Ozon: {query}")
-        url = f"https://api.ozon.ru/composer-api.bx/_action/search?q={query}"
-        resp = requests.get(url, timeout=10)
-        print(f"   Ozon статус: {resp.status_code}")
-        if resp.status_code != 200:
-            return {"error": f"Ozon вернул статус {resp.status_code}"}
-        data = resp.json()
-        items = data.get('items', [])
-        print(f"   Ozon: найдено {len(items)} товаров")
-        if not items:
-            return {"error": "Ozon не нашёл товары"}
-        product = items[0]
-        price = product.get('price', 0) / 100 if product.get('price') else 0
+            return {"error": f"Страница не загружена, статус {resp.status_code}"}
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        # Ищем название
+        name_tag = soup.find('h1', class_='product-page__title')
+        name = name_tag.text.strip() if name_tag else None
+        # Ищем цену (в JSON-данных)
+        price_script = soup.find('script', text=re.compile(r'"priceU":\d+'))
+        price = None
+        if price_script:
+            match = re.search(r'"priceU":(\d+)', price_script.text)
+            if match:
+                price = int(match.group(1)) / 100
+        # Рейтинг
+        rating_span = soup.find('span', class_='product-review__rating')
+        rating = float(rating_span.text.replace(',', '.')) if rating_span else None
+        # Отзывы
+        reviews_span = soup.find('span', class_='product-review__count')
+        feedbacks = int(reviews_span.text.replace(' ', '')) if reviews_span else 0
+        # Продавец
+        seller_span = soup.find('span', class_='product-page__seller-name')
+        seller = seller_span.text.strip() if seller_span else None
+        if not any([name, price, rating, feedbacks, seller]):
+            return {"error": "Не удалось извлечь данные (возможно, страница изменилась)"}
         return {
-            "name": product.get('title', ''),
+            "name": name,
             "price": price,
-            "rating": product.get('rating', 0),
-            "feedbacks": product.get('reviews_count', 0),
-            "seller": product.get('seller', {}).get('name', '')
+            "rating": rating,
+            "feedbacks": feedbacks,
+            "seller": seller
         }
     except Exception as e:
-        print(f"   Ozon: исключение {e}")
-        return {"error": f"Исключение Ozon: {str(e)}"}
+        return {"error": f"Ошибка при парсинге WB: {str(e)}"}
+
+def parse_ozon_link(url: str):
+    """Парсит страницу Ozon"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return {"error": f"Страница не загружена, статус {resp.status_code}"}
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        # Название
+        name_tag = soup.find('h1', class_='product-title')
+        if not name_tag:
+            name_tag = soup.find('h1', class_='product-heading')
+        name = name_tag.text.strip() if name_tag else None
+        # Цена (ищем в JSON или в тегах)
+        price_tag = soup.find('span', class_='price-value')
+        if price_tag:
+            price_text = price_tag.text.replace(' ', '').replace('₽', '').strip()
+            price = float(price_text) if price_text else None
+        else:
+            # Ищем в JSON-данных
+            script = soup.find('script', text=re.compile(r'"price":"\d+"'))
+            if script:
+                match = re.search(r'"price":"(\d+)"', script.text)
+                if match:
+                    price = int(match.group(1)) / 100
+                else:
+                    price = None
+            else:
+                price = None
+        # Рейтинг
+        rating_span = soup.find('span', class_='rating-score')
+        if rating_span:
+            rating_text = rating_span.text.replace(',', '.').strip()
+            rating = float(rating_text) if rating_text else None
+        else:
+            rating = None
+        # Отзывы
+        reviews_span = soup.find('span', class_='reviews-count')
+        if reviews_span:
+            feedbacks = int(reviews_span.text.replace(' ', '').replace('(', '').replace(')', '')) if reviews_span.text else 0
+        else:
+            feedbacks = 0
+        # Продавец (на Ozon продавец часто в JSON)
+        seller = None
+        seller_script = soup.find('script', text=re.compile(r'"sellerName":"[^"]+"'))
+        if seller_script:
+            match = re.search(r'"sellerName":"([^"]+)"', seller_script.text)
+            if match:
+                seller = match.group(1)
+        if not any([name, price, rating, feedbacks, seller]):
+            return {"error": "Не удалось извлечь данные (возможно, страница изменилась)"}
+        return {
+            "name": name,
+            "price": price,
+            "rating": rating,
+            "feedbacks": feedbacks,
+            "seller": seller
+        }
+    except Exception as e:
+        return {"error": f"Ошибка при парсинге Ozon: {str(e)}"}
 
 @app.post("/api/analyze-article")
 async def analyze_article(req: ArticleRequest):
@@ -117,13 +134,16 @@ async def analyze_article(req: ArticleRequest):
     if not query:
         raise HTTPException(status_code=400, detail="Пустой запрос")
 
+    # Определяем, ссылка на какой маркетплейс
     if 'wildberries.ru' in query:
         result = parse_wb_link(query)
-        if isinstance(result, dict) and "error" in result:
-            raise HTTPException(status_code=404, detail=result["error"])
-        return result
+    elif 'ozon.ru' in query:
+        result = parse_ozon_link(query)
+    else:
+        # Если это не ссылка, пробуем искать на Ozon (но это не будет работать из-за блокировок)
+        # Для простоты возвращаем ошибку
+        raise HTTPException(status_code=400, detail="Пожалуйста, вставьте ссылку на товар с Wildberries или Ozon")
 
-    result = search_ozon(query)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
