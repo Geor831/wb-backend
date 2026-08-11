@@ -21,19 +21,23 @@ async def root():
     return FileResponse("index.html")
 
 class ArticleRequest(BaseModel):
-    article: str  # оставляем имя article, чтобы не менять интерфейс
+    article: str
 
 def parse_wb_link(url: str):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     try:
+        print(f"🔍 Парсим WB: {url}")
         resp = requests.get(url, headers=headers, timeout=10)
+        print(f"   WB статус: {resp.status_code}")
         if resp.status_code != 200:
             return None
         html = resp.text
+        # Ищем __NEXT_DATA__
         match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html)
         if not match:
+            # пробуем __INITIAL_STATE__
             match = re.search(r'<script>window\.__INITIAL_STATE__\s*=\s*({.*?});</script>', html)
         if match:
             data_str = match.group(1)
@@ -70,19 +74,26 @@ def parse_wb_link(url: str):
                             "feedbacks": feedbacks,
                             "seller": seller
                         }
-            except json.JSONDecodeError:
-                pass
+                print("   Не удалось найти товар в JSON")
+            except json.JSONDecodeError as e:
+                print(f"   Ошибка парсинга JSON: {e}")
+        else:
+            print("   Не найден блок с JSON-данными")
         return None
-    except:
+    except Exception as e:
+        print(f"   Исключение WB: {e}")
         return None
 
 def search_ozon(query: str):
     try:
+        print(f"🔍 Ищем на Ozon: {query}")
         url = f"https://api.ozon.ru/composer-api.bx/_action/search?q={query}"
         resp = requests.get(url, timeout=10)
+        print(f"   Ozon статус: {resp.status_code}")
         if resp.status_code != 200:
             return None
         data = resp.json()
+        print(f"   Ozon ответ содержит {len(data.get('items', []))} товаров")
         items = data.get('items', [])
         if not items:
             return None
@@ -95,7 +106,8 @@ def search_ozon(query: str):
             "feedbacks": product.get('reviews_count', 0),
             "seller": product.get('seller', {}).get('name', '')
         }
-    except:
+    except Exception as e:
+        print(f"   Исключение Ozon: {e}")
         return None
 
 @app.post("/api/analyze-article")
