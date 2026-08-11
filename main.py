@@ -32,12 +32,10 @@ def parse_wb_link(url: str):
         resp = requests.get(url, headers=headers, timeout=10)
         print(f"   WB статус: {resp.status_code}")
         if resp.status_code != 200:
-            return None
+            return {"error": f"WB вернул статус {resp.status_code}"}
         html = resp.text
-        # Ищем __NEXT_DATA__
         match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html)
         if not match:
-            # пробуем __INITIAL_STATE__
             match = re.search(r'<script>window\.__INITIAL_STATE__\s*=\s*({.*?});</script>', html)
         if match:
             data_str = match.group(1)
@@ -52,6 +50,7 @@ def parse_wb_link(url: str):
                         rating = product.get('rating')
                         feedbacks = product.get('feedbacks')
                         seller = product.get('seller', {}).get('name')
+                        print("   WB: товар найден!")
                         return {
                             "name": name,
                             "price": price,
@@ -67,6 +66,7 @@ def parse_wb_link(url: str):
                         rating = product_data.get('rating')
                         feedbacks = product_data.get('feedbacks')
                         seller = product_data.get('seller', {}).get('name')
+                        print("   WB: товар найден!")
                         return {
                             "name": name,
                             "price": price,
@@ -74,15 +74,16 @@ def parse_wb_link(url: str):
                             "feedbacks": feedbacks,
                             "seller": seller
                         }
-                print("   Не удалось найти товар в JSON")
+                print("   WB: товар не найден в JSON")
+                return {"error": "Товар не найден в JSON-данных"}
             except json.JSONDecodeError as e:
-                print(f"   Ошибка парсинга JSON: {e}")
-        else:
-            print("   Не найден блок с JSON-данными")
-        return None
+                print(f"   WB: ошибка парсинга JSON: {e}")
+                return {"error": f"Ошибка парсинга JSON: {e}"}
+        print("   WB: не найден блок с JSON")
+        return {"error": "Не найден блок с JSON-данными"}
     except Exception as e:
-        print(f"   Исключение WB: {e}")
-        return None
+        print(f"   WB: исключение {e}")
+        return {"error": f"Исключение WB: {str(e)}"}
 
 def search_ozon(query: str):
     try:
@@ -91,12 +92,12 @@ def search_ozon(query: str):
         resp = requests.get(url, timeout=10)
         print(f"   Ozon статус: {resp.status_code}")
         if resp.status_code != 200:
-            return None
+            return {"error": f"Ozon вернул статус {resp.status_code}"}
         data = resp.json()
-        print(f"   Ozon ответ содержит {len(data.get('items', []))} товаров")
         items = data.get('items', [])
+        print(f"   Ozon: найдено {len(items)} товаров")
         if not items:
-            return None
+            return {"error": "Ozon не нашёл товары"}
         product = items[0]
         price = product.get('price', 0) / 100 if product.get('price') else 0
         return {
@@ -107,8 +108,8 @@ def search_ozon(query: str):
             "seller": product.get('seller', {}).get('name', '')
         }
     except Exception as e:
-        print(f"   Исключение Ozon: {e}")
-        return None
+        print(f"   Ozon: исключение {e}")
+        return {"error": f"Исключение Ozon: {str(e)}"}
 
 @app.post("/api/analyze-article")
 async def analyze_article(req: ArticleRequest):
@@ -117,15 +118,15 @@ async def analyze_article(req: ArticleRequest):
         raise HTTPException(status_code=400, detail="Пустой запрос")
 
     if 'wildberries.ru' in query:
-        product = parse_wb_link(query)
-        if not product:
-            raise HTTPException(status_code=404, detail="Не удалось получить данные с Wildberries")
-        return product
+        result = parse_wb_link(query)
+        if isinstance(result, dict) and "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
 
-    product = search_ozon(query)
-    if not product:
-        raise HTTPException(status_code=404, detail="Товар не найден на Ozon")
-    return product
+    result = search_ozon(query)
+    if isinstance(result, dict) and "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 if __name__ == "__main__":
     import uvicorn
